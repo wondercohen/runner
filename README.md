@@ -1,7 +1,7 @@
 # SSH Runner
 
 A lightweight **Bash command runner** for executing one command or a reviewed command file on localhost, selected Linux servers, or all configured SSH nodes. It uses the system OpenSSH client; no Ansible installation or Python runtime is required.
-
+**Latest stable release:** [v1.0.1](https://github.com/wondercohen/runner/releases/latest)
 **Developed by Wonder Cohen B.V.**
 
 ## Features

@@ -13,6 +13,7 @@ set -u
 set -o pipefail
 
 package="runner"
+VERSION="1.0.1"
 # Restrict permissions on generated log files.
 umask 077
 # Configuration is relative to the script, not the current working directory.
@@ -139,6 +140,12 @@ cleanup() {
 
 # ---------- Output helpers ----------
 
+print_version() {
+  printf 'SSH Runner v%s\n' "$VERSION"
+  printf 'Copyright (c) 2026 Wonder Cohen B.V.\n'
+  printf 'License: BSD-3-Clause\n'
+}
+
 print_run_header() {
   echo "=========================================="
   echo "$package — run started: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
@@ -166,6 +173,7 @@ usage() {
   echo " "
   echo "options:"
   echo "-h, --help                           show this help"
+  echo "-V, --version                        show version and exit"
   echo "-l, --list                           list known nodes and exit"
   echo "-c, --cmd=\"<command>\"               run one ad-hoc command"
   echo "-f, --file=<path>                    run every command line in <path>"
@@ -188,6 +196,7 @@ usage() {
   list_nodes
   echo " "
   echo "Examples:"
+  echo "  $package --version"
   echo "  $package -l"
   echo "  $package -c \"pwd\""
   echo "  $package -f checks/system-info.txt"
@@ -241,6 +250,10 @@ append_host_unique() {
 parse_args() {
   while test $# -gt 0; do
     case "$1" in
+      -V|--version)
+        print_version
+        exit 0
+        ;;
       -h|--help)
         usage
         exit 0
@@ -430,6 +443,12 @@ run_all() {
 
 main() {
   trap cleanup EXIT
+
+  # Version information must work even before runner.cfg is created.
+  if [[ $# -eq 1 && ( "$1" == "--version" || "$1" == "-V" ) ]]; then
+    print_version
+    exit 0
+  fi
 
   load_config
   parse_args "$@"
