@@ -1,0 +1,4 @@
+# Example: each line runs independently.
+date
+uname -a
+uptime

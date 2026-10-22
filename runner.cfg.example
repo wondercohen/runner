@@ -1,0 +1,25 @@
+# runner.cfg.example — safe, fictional inventory for SSH Runner.
+# Copy to runner.cfg and replace every example value with your own.
+# This is trusted Bash code sourced by runner.sh. Never use untrusted content.
+# SSH key entries are FILE PATHS only, not key material or passphrases.
+
+# Global defaults. Per-node values override these settings.
+SSH_USER="deploy"
+SSH_KEY_PATH="${HOME}/.ssh/id_ed25519"
+LOG_DIR="${HOME}/.local/state/runner"
+
+# Format: [ID]="IP_ADDRESS|NODE_HOSTNAME|HOST_SSH_KEY_PATH|HOST_SSH_USER"
+# Empty SSH key/user fields fall back to the global defaults.
+# IPs below use reserved documentation ranges (RFC 5737).
+declare -gA NODE_INVENTORY=(
+  [1]="192.0.2.10|node1.example.com||"
+  [2]="198.51.100.20|node2.example.com||"
+  [3]="203.0.113.30|node3.example.com|${HOME}/.ssh/id_ed25519_admin|admin"
+)
+
+# Optional friendly descriptions displayed by -l.
+declare -gA NODE_ROLE=(
+  [1]="Application server"
+  [2]="Database server"
+  [3]="Administration server"
+)

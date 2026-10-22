@@ -1,0 +1,22 @@
+# Private or machine-specific configuration
+/runner.cfg
+.env
+.env.*
+!.env.example
+
+# Keys and secrets
+.ssh/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Generated files and local-only checks
+logs/
+*.log
+*.bak
+*~
+checks/private/
+checks/*.local
+__pycache__/
+.DS_Store
