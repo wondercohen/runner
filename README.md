@@ -331,7 +331,7 @@ Identity added: /home/admin/.ssh/id_rsa
 The following 2 command(s) will run on: node01.example.com node02.example.com
 ---
   date
-  uptime
+  sudo uptime
 ---
 Proceed? [y/N] y
 
