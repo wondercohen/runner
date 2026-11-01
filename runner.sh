@@ -426,7 +426,7 @@ run_all() {
       else
         key="${HOST_SSH_KEY_PATH[$host]}"
         user="${HOST_SSH_USER[$host]}"
-        ssh -n -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
+        ssh -q -n -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
       fi
 
       rc=${PIPESTATUS[0]}
