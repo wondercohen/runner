@@ -1,4 +1,3 @@
-
 # Privilege escalation design — SSH Runner
 
 This document describes Runner's **BECOME** integration. It deliberately does not define or modify server-side `sudoers`, PAM, TOTP, or credential-cache policies.
@@ -6,7 +5,7 @@ This document describes Runner's **BECOME** integration. It deliberately does no
 ## Security model
 
 1. Runner connects using the configured SSH key and **ordinary SSH user**.
-2. `BECOME_DEFAULT=false` is the default. Each node may override with a fifth `NODE_INVENTORY` field (`true` or `false`). CLI `--become` / `--no-become` takes precedence.
+2. Global `become = false` is the default in the data-only `runner.cfg` file. Each `[node:N]` section can override it with `become = true` or `false`. CLI `--become` / `--no-become` takes precedence.
 3. For a node with become enabled, Runner opens **one interactive SSH session** (forced PTY with `ssh -tt`) and executes **one remote `sudo -H -- /bin/bash -c ...`** process for that invocation.
 4. Inside the privileged Bash process, each reviewed command is run in a separate `/bin/bash -c` child; shell state does not persist between commands. The remote process emits a status for each command, which Runner shows and logs.
 5. The server's `sudo` and PAM stack determine how to authenticate (password, rotating code, other challenge, already-authorized sudo, or passwordless policy). Runner never asks for the secret itself and never supplies credential material via a scripted stdin pipe, arguments, environment variables, files, or logs. SSH naturally forwards interactive keystrokes to the server's PTY, and well-behaved sudo/PAM prompts turn off terminal echo.
@@ -18,7 +17,7 @@ Ansible also treats `become` as distinct from SSH access, and supports host sett
 
 ## Important limitations
 
-- **Broad privilege:** authorizing `sudo /bin/bash -c ...` is effectively authorizing a root shell. This is a design for trusted administrators who intentionally run arbitrary privileged commands; it does not preserve command-by-command sudoers allowlists. Avoid `BECOME=true` for restricted automation accounts.
+- **Broad privilege:** authorizing `sudo /bin/bash -c ...` is effectively authorizing a root shell. This is a design for trusted administrators who intentionally run arbitrary privileged commands; it does not preserve command-by-command sudoers allowlists. Avoid `become = true` for restricted automation accounts.
 - **Trust command files:** any text supplied via `-c` or `-f` runs as root when become is active. Review the confirmation preview; `-y` disables this preview confirmation, not sudo authentication.
 - **Interactive only:** become mode requires a terminal. It is not suitable for cron or other unattended runs without further design.
 - **Terminal logs:** terminal **output** (including PAM prompt text) is logged. Input is not logged by Runner. Ensure remote PAM prompts disable echo for secrets; if any remote program prints a password, TOTP or other secret, that output may be recorded.
@@ -29,7 +28,7 @@ Ansible also treats `become` as distinct from SSH access, and supports host sett
 
 ## Optional sudoers authentication grace period
 
-Runner intentionally does not control sudo authentication caching. A system administrator may configure the remote server's `sudoers` policy to reduce repeated password or TOTP challenges **between independent Runner executions**.
+Runner intentionally does not control sudo authentication caching. The local `runner.cfg` is parsed as plain data, not sourced or executed. A system administrator may configure the remote server's `sudoers` policy to reduce repeated password or TOTP challenges **between independent Runner executions**.
 
 For example, for the **individual account named `admin`**, to allow a four-hour (240-minute) authentication timestamp shared across that account's sessions:
 

@@ -1,0 +1,15 @@
+# Old Bash-style inventory, documentation only. NEVER sourced by migration.
+SSH_USER="deploy"
+SSH_KEY_PATH="${HOME}/.ssh/id_ed25519"
+LOG_DIR="${HOME}/.local/state/runner"
+BECOME_DEFAULT=false
+
+declare -gA NODE_INVENTORY=(
+  [1]="192.0.2.10|node1.example.com|||true"
+  [2]="198.51.100.20|node2.example.com|${HOME}/.ssh/id_ed25519_ops|ops|false"
+)
+
+declare -gA NODE_ROLE=(
+  [1]="Application server"
+  [2]="Database server"
+)

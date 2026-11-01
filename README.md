@@ -98,6 +98,7 @@ After conversion, test with `-l` and a local command before targeting servers. K
 ./runner.sh -c 'hostname'                         # localhost
 ./runner.sh -f checks/system-info.txt             # localhost
 ./runner.sh -n 1 -c 'uptime'                      # node by ID
+./runner.sh -v -n 1 -c 'uptime'                   # verbose SSH diagnostics
 ./runner.sh -n node1.example.com -c 'uptime'      # node by name
 ./runner.sh -n 1 2 -c 'date'                    # multiple nodes
 ./runner.sh -a -f checks/system-info.txt          # every configured remote node
@@ -124,6 +125,8 @@ See [Privilege escalation design](docs/PRIVILEGE-ESCALATION.md) for implications
 ### Execution, SSH failures and logs
 
 Every non-empty, non-comment line of a `-f` file is executed as an independent command; shell state does not persist across lines. Review command files first. The confirmation screen displays selected targets, commands and whether become is enabled.
+
+SSH is quiet by default (`-q`); use `-v` or `--verbose` to enable OpenSSH diagnostic output when troubleshooting. This applies to both normal and BECOME connections. Verbose output can expose connection details and is included in logs; use it intentionally. Server-generated command output is unaffected by the quiet flag.
 
 SSH forwarding of X11, the agent, and extra configured forwards is explicitly disabled. Runner retains OpenSSH's normal host-key verification policy. SSH identities and host authentication behavior otherwise remain unchanged.
 

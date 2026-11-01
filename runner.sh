@@ -175,6 +175,8 @@ FILE=""
 SKIP_CONFIRM=0
 ALL_REMOTE=0
 USE_IP=0
+# SSH diagnostics are hidden by default. -v/--verbose enables OpenSSH debug output.
+SSH_VERBOSITY_OPTS=(-q)
 NONZERO_COUNT=0
 STARTED_SSH_AGENT=0
 BECOME_OVERRIDE=""
@@ -274,6 +276,7 @@ usage() {
   echo "options:"
   echo "-h, --help                           show this help"
   echo "-V, --version                        show version and exit"
+  echo "-v, --verbose                        show SSH diagnostics (default: quiet)"
   echo "-l, --list                           list known nodes and exit"
   echo "-c, --cmd=\"<command>\"               run one ad-hoc command"
   echo "-f, --file=<path>                    run every command line in <path>"
@@ -287,6 +290,7 @@ usage() {
   echo " "
   echo "Default target (no -a, no -n): localhost, run directly with bash — no SSH involved."
   echo "Remote connections use NODE_HOSTNAME unless -ip is specified."
+  echo "SSH runs quietly by default; -v/--verbose enables OpenSSH debug output."
   echo "Become defaults to BECOME_DEFAULT and each node may override it."
   echo "Become opens one interactive SSH session per node for all commands."
   echo "Run become mode from a terminal; the server's sudo/PAM handles authentication."
@@ -303,6 +307,7 @@ usage() {
   echo "Examples:"
   echo "  $package --version"
   echo "  $package -l"
+  echo "  $package -v -n 1 -c 'hostname'"
   echo "  $package -c \"pwd\""
   echo "  $package -f checks/system-info.txt"
   echo "  $package -c \"hostname\" -a"
@@ -412,6 +417,10 @@ parse_args() {
         local resolved
         resolved=$(resolve_node "${1#*=}") || exit 1
         append_host_unique "$resolved"
+        shift
+        ;;
+      -v|--verbose)
+        SSH_VERBOSITY_OPTS=(-v)
         shift
         ;;
       -a|--all)
@@ -611,7 +620,7 @@ run_become_host() {
     user="${HOST_SSH_USER[$host]}"
     q_script=$(shell_quote "$BECOME_SCRIPT")
     remote_cmd="sudo -H -- /bin/bash -c ${q_script}"
-    ssh -tt -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
+    ssh "${SSH_VERBOSITY_OPTS[@]}" -tt -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
       -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
       "${user}@${address}" "$remote_cmd" 2>&1 |
       process_become_output "$marker" "$status_file" | tee -a "$LOGFILE"
@@ -703,7 +712,7 @@ run_all() {
       else
         key="${HOST_SSH_KEY_PATH[$host]}"
         user="${HOST_SSH_USER[$host]}"
-        ssh -n -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
+        ssh "${SSH_VERBOSITY_OPTS[@]}" -n -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
           -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
           "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
       fi
