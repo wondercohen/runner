@@ -1,32 +1,25 @@
-# SSH Runner configuration — plain text, not executable Bash.
-# Copy this file to runner.cfg and set chmod 600 runner.cfg.
-# One [global] section, then one [node:N] section per server.
-# Paths must be absolute or start with ~/ (expanded to the runner user's home).
-# Do not use shell variables, quotes, commands or inline comments in values.
-# This example uses reserved documentation IP addresses and hostnames.
+# runner.cfg.example — safe, fictional inventory for SSH Runner.
+# Copy to runner.cfg and replace every example value with your own.
+# This is trusted Bash code sourced by runner.sh. Never use untrusted content.
+# SSH key entries are FILE PATHS only, not key material or passphrases.
 
-[global]
-ssh_user = deploy
-ssh_key_path = ~/.ssh/id_ed25519
-log_dir = ~/.local/state/runner
-become = false
+# Global defaults. Per-node values override these settings.
+SSH_USER="deploy"
+SSH_KEY_PATH="${HOME}/.ssh/id_ed25519"
+LOG_DIR="${HOME}/.local/state/runner"
 
-[node:1]
-ip = 192.0.2.10
-hostname = node1.example.com
-role = Application server
-become = true
+# Format: [ID]="IP_ADDRESS|NODE_HOSTNAME|HOST_SSH_KEY_PATH|HOST_SSH_USER"
+# Empty SSH key/user fields fall back to the global defaults.
+# IPs below use reserved documentation ranges (RFC 5737).
+declare -gA NODE_INVENTORY=(
+  [1]="192.0.2.10|node1.example.com||"
+  [2]="198.51.100.20|node2.example.com||"
+  [3]="203.0.113.30|node3.example.com|${HOME}/.ssh/id_ed25519_admin|admin"
+)
 
-[node:2]
-ip = 198.51.100.20
-hostname = node2.example.com
-role = Database server
-become = false
-
-[node:3]
-ip = 203.0.113.30
-hostname = node3.example.com
-ssh_user = admin
-ssh_key_path = ~/.ssh/id_ed25519_admin
-role = Administration server
-# become inherits the global default when omitted
+# Optional friendly descriptions displayed by -l.
+declare -gA NODE_ROLE=(
+  [1]="Application server"
+  [2]="Database server"
+  [3]="Administration server"
+)
