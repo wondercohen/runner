@@ -7,14 +7,18 @@
 SSH_USER="deploy"
 SSH_KEY_PATH="${HOME}/.ssh/id_ed25519"
 LOG_DIR="${HOME}/.local/state/runner"
+BECOME_DEFAULT=false
 
-# Format: [ID]="IP_ADDRESS|NODE_HOSTNAME|HOST_SSH_KEY_PATH|HOST_SSH_USER"
-# Empty SSH key/user fields fall back to the global defaults.
+# Format: [ID]="IP_ADDRESS|NODE_HOSTNAME|HOST_SSH_KEY_PATH|HOST_SSH_USER|BECOME"
+# Empty SSH key/user/become fields fall back to the global defaults.
+# BECOME=true means run commands via sudo as root; the remote server's sudo/PAM
+# policy decides whether to prompt for a password, TOTP, or another challenge.
+# Never store sudo passwords or TOTP secrets here.
 # IPs below use reserved documentation ranges (RFC 5737).
 declare -gA NODE_INVENTORY=(
-  [1]="192.0.2.10|node1.example.com||"
-  [2]="198.51.100.20|node2.example.com||"
-  [3]="203.0.113.30|node3.example.com|${HOME}/.ssh/id_ed25519_admin|admin"
+  [1]="192.0.2.10|node1.example.com|||true"
+  [2]="198.51.100.20|node2.example.com|||false"
+  [3]="203.0.113.30|node3.example.com|${HOME}/.ssh/id_ed25519_admin|admin|"
 )
 
 # Optional friendly descriptions displayed by -l.
