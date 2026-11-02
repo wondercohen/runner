@@ -71,8 +71,7 @@ load_config() {
   SSH_USER=''
   SSH_KEY_PATH=''
   LOG_DIR=''
-  BECOME_DEFAULT='false'
-  declare -gA NODE_MAP=() NODE_HOSTNAME=() HOST_SSH_KEY_PATH=() HOST_SSH_USER=() HOST_BECOME=() NODE_ROLE=()
+  declare -gA NODE_MAP=() NODE_HOSTNAME=() HOST_SSH_KEY_PATH=() HOST_SSH_USER=() NODE_ROLE=()
   local line section='' node='' key value lineno=0 identity section_name address
   local -A seen_section=() seen_key=()
 
@@ -109,7 +108,6 @@ load_config() {
         ssh_user) SSH_USER="$value" ;;
         ssh_key_path) SSH_KEY_PATH="$value" ;;
         log_dir) LOG_DIR="$value" ;;
-        become) BECOME_DEFAULT="$value" ;;
         *) config_error "$lineno" "Unknown global setting: $key" ;;
       esac
     else
@@ -118,7 +116,6 @@ load_config() {
         hostname) NODE_HOSTNAME[$node]="$value" ;;
         ssh_user) HOST_SSH_USER[$node]="$value" ;;
         ssh_key_path) HOST_SSH_KEY_PATH[$node]="$value" ;;
-        become) HOST_BECOME[$node]="$value" ;;
         role) NODE_ROLE[$node]="$value" ;;
         *) config_error "$lineno" "Unknown node setting: $key" ;;
       esac
@@ -128,7 +125,6 @@ load_config() {
   [[ -n "${seen_section[global]:-}" ]] || config_error 'EOF' 'Missing [global] section.'
   [[ -n "$SSH_USER" && -n "$SSH_KEY_PATH" ]] || config_error 'EOF' 'Missing global ssh_user or ssh_key_path.'
   [[ "$SSH_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]] || config_error 'EOF' 'Invalid global SSH user.'
-  [[ "$BECOME_DEFAULT" == true || "$BECOME_DEFAULT" == false ]] || config_error 'EOF' 'Global become must be true or false.'
   SSH_KEY_PATH=$(expand_config_path "$SSH_KEY_PATH") || config_error 'EOF' 'Global ssh_key_path must be absolute or begin with ~/.'
   LOG_DIR=$(expand_config_path "${LOG_DIR:-~/.local/state/runner}") || config_error 'EOF' 'log_dir must be absolute or begin with ~/.'
   (( ${#NODE_MAP[@]} > 0 )) || config_error 'EOF' 'No nodes defined.'
@@ -150,8 +146,6 @@ load_config() {
     HOST_SSH_USER[$node]="${HOST_SSH_USER[$node]:-$SSH_USER}"
     [[ "${HOST_SSH_USER[$node]}" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]] || config_error 'EOF' "Invalid SSH user for node $node."
     HOST_SSH_KEY_PATH[$node]=$(expand_config_path "${HOST_SSH_KEY_PATH[$node]:-$SSH_KEY_PATH}") || config_error 'EOF' "Invalid SSH key path for node $node."
-    HOST_BECOME[$node]="${HOST_BECOME[$node]:-$BECOME_DEFAULT}"
-    [[ "${HOST_BECOME[$node]}" == true || "${HOST_BECOME[$node]}" == false ]] || config_error 'EOF' "Invalid become for node $node."
   done
 }
 
@@ -179,11 +173,8 @@ USE_IP=0
 SSH_VERBOSITY_OPTS=(-q)
 NONZERO_COUNT=0
 STARTED_SSH_AGENT=0
-BECOME_OVERRIDE=""
 SKIPPED_COUNT=0
-BECOME_ERROR=0
 TRANSPORT_ERROR=0
-TEMP_FILES=()
 
 # ---------- SSH agent handling ----------
 # Scoped to this script's own process tree only — it cannot persist back into
@@ -231,10 +222,6 @@ ensure_ssh_agent() {
 # ShellCheck cannot detect that cleanup is invoked by the EXIT trap.
 # shellcheck disable=SC2317
 cleanup() {
-  local tmp
-  for tmp in "${TEMP_FILES[@]}"; do
-    [[ -z "$tmp" ]] || rm -f -- "$tmp"
-  done
   if [ "$STARTED_SSH_AGENT" -eq 1 ]; then
     ssh-agent -k >/dev/null 2>&1 || true
   fi
@@ -258,13 +245,13 @@ list_nodes() {
   echo "Known remote nodes (from $CONFIG_FILE):"
   local label
   for label in "${!NODE_MAP[@]}"; do
-    printf "  %-20s = %-18s label=%s  (%s)  user=%s  key=%s  become=%s\n" \
+    printf "  %-20s = %-18s label=%s  (%s)  user=%s  key=%s\n" \
       "${NODE_HOSTNAME[$label]}" "${NODE_MAP[$label]}" "$label" \
-      "${NODE_ROLE[$label]:-${NODE_HOSTNAME[$label]}}" "${HOST_SSH_USER[$label]}" "${HOST_SSH_KEY_PATH[$label]}" "${HOST_BECOME[$label]}"
+      "${NODE_ROLE[$label]:-${NODE_HOSTNAME[$label]}}" "${HOST_SSH_USER[$label]}" "${HOST_SSH_KEY_PATH[$label]}"
   done | sort
   echo " "
   echo "Special target:"
-  echo "  localhost    (default target — commands run directly, no SSH; become=$BECOME_DEFAULT)"
+  echo "  localhost    (default target — commands run directly, no SSH)"
 }
 
 usage() {
@@ -284,16 +271,13 @@ usage() {
   echo "                                      list multiple targets after one -n"
   echo "-a, --all                            target all configured remote nodes"
   echo "-ip, --ip                            connect by IP instead of hostname"
-  echo "-b, --become                        run selected commands through sudo as root"
-  echo "--no-become                         run without automatic sudo (override config)"
   echo "-y, --yes                            skip the confirmation prompt (use sparingly)"
   echo " "
   echo "Default target (no -a, no -n): localhost, run directly with bash — no SSH involved."
   echo "Remote connections use NODE_HOSTNAME unless -ip is specified."
   echo "SSH runs quietly by default; -v/--verbose enables OpenSSH debug output."
-  echo "Become defaults to BECOME_DEFAULT and each node may override it."
-  echo "Become opens one interactive SSH session per node for all commands."
-  echo "Run become mode from a terminal; the server's sudo/PAM handles authentication."
+  echo "Commands are executed exactly as written."
+  echo "Remote commands beginning with sudo get a PTY so sudo/PAM can prompt interactively."
   echo " "
   echo "A -f file is line-oriented: each non-empty, non-comment line is an independent"
   echo "command. Shell state such as cd, variables, and shell options does not persist"
@@ -314,8 +298,7 @@ usage() {
   echo "  $package -n 1 -f checks/system-info.txt"
   echo "  $package -n 1 localhost -c \"hostname\""
   echo "  $package -a -ip -f checks/system-info.txt"
-  echo "  $package --become -n 1 -c 'id -u'"
-  echo "  $package --no-become -a -c 'id -un'"
+  echo "  $package -n 1 -c 'sudo id -u'"
 }
 
 # ---------- Node resolution ----------
@@ -431,14 +414,6 @@ parse_args() {
         USE_IP=1
         shift
         ;;
-      -b|--become)
-        BECOME_OVERRIDE="true"
-        shift
-        ;;
-      --no-become)
-        BECOME_OVERRIDE="false"
-        shift
-        ;;
       -y|--yes)
         SKIP_CONFIRM=1
         shift
@@ -520,11 +495,6 @@ confirm_run() {
     destinations+=("$destination")
   done
   echo "The following ${#CMDS[@]} command(s) will run on: ${destinations[*]}"
-  echo "Privileges by target (sudo runs as root only when become=true):"
-  for host in "${SELECTED_HOSTS[@]}"; do
-    destination=$(connection_address "$host")
-    printf '  %-26s become=%s\n' "$destination" "$(become_for_host "$host")"
-  done
   echo "---"
   local c
   for c in "${CMDS[@]}"; do
@@ -544,148 +514,15 @@ confirm_run() {
 
 # ---------- Execution ----------
 
-# Only Runner decides WHETHER to sudo. PAM and sudoers decide HOW to
-# authenticate. No password/TOTP is collected, generated, or stored here.
-# The single privileged bash process is appropriate for trusted admin
-# accounts with broad sudo rights, not restricted sudo command allowlists.
+# Runner executes commands exactly as written. It does not decide what requires
+# root and does not prepend sudo. For remote commands whose first command word
+# is sudo, Runner requests a PTY so the remote sudo/PAM stack can prompt the
+# administrator directly. Other remote commands keep the original noninteractive
+# SSH path.
 
-become_for_host() {
-  local host="$1"
-  if [[ -n "$BECOME_OVERRIDE" ]]; then
-    printf '%s\n' "$BECOME_OVERRIDE"
-  elif [[ "$host" == "localhost" ]]; then
-    printf '%s\n' "$BECOME_DEFAULT"
-  else
-    printf '%s\n' "${HOST_BECOME[$host]}"
-  fi
-}
-
-# POSIX shell single-quoting, including arbitrary literal single quotes.
-shell_quote() {
-  local value="$1"
-  value="${value//\'/\'\\\'\'}"
-  printf "'%s'" "$value"
-}
-
-# Runs each command in an independent bash -c *inside one sudo invocation*.
-# Marker lines let Runner recover per-command statuses from one SSH session.
-build_become_script() {
-  local address="$1" marker="$2" c idx=0 qcommand qheader
-  BECOME_SCRIPT=''
-  for c in "${CMDS[@]}"; do
-    qcommand=$(shell_quote "$c")
-    qheader=$(shell_quote "=== ${address} — ${c} —")
-    BECOME_SCRIPT+="printf '%s %s ===\\n' $qheader \"\$(date -u +%FT%TZ)\""$'\n'
-    BECOME_SCRIPT+="/bin/bash -c $qcommand"$'\n'
-    BECOME_SCRIPT+='__runner_rc=$?'$'\n'
-    BECOME_SCRIPT+="printf '\\n%s:%s\\n' ${marker}${idx} \"\$__runner_rc\""$'\n'
-    BECOME_SCRIPT+="printf '\\n'"$'\n'
-    idx=$((idx+1))
-  done
-  BECOME_SCRIPT+='exit 0'$'\n'
-}
-
-# One SSH session and one sudo call for all commands on this host.
-# sudo uses the remote terminal to prompt according to server PAM policy.
-# Terminal input is NOT recorded by Runner; command output still is.
-run_become_host() {
-  local host="$1" address="$2" marker status_file ssh_rc idx rc expected=0
-  local key user q_script remote_cmd line remainder
-
-  if [[ ! -t 0 ]]; then
-    echo "ERROR: Become mode requires an interactive terminal (stdin must be a TTY)." >&2
-    SKIPPED_COUNT=$((SKIPPED_COUNT + ${#CMDS[@]}))
-    BECOME_ERROR=1
-    return 1
-  fi
-
-  status_file=$(mktemp "${LOG_DIR%/}/.runner_status.XXXXXXXX") || {
-    echo "ERROR: Could not create private status file." >&2
-    SKIPPED_COUNT=$((SKIPPED_COUNT + ${#CMDS[@]}))
-    BECOME_ERROR=1
-    return 1
-  }
-  TEMP_FILES+=("$status_file")
-  marker="__RUNNER_RESULT_${BASHPID}_${RANDOM}_${RANDOM}_"
-  build_become_script "$address" "$marker"
-
-  # Do NOT pipe a password or TOTP through SSH stdin. Use remote sudo's
-  # interactive /dev/tty. -tt allocates a remote PTY; -n is intentionally absent.
-  if [[ "$host" == "localhost" ]]; then
-    sudo -H -- /bin/bash -c "$BECOME_SCRIPT" 2>&1 |
-      process_become_output "$marker" "$status_file" | tee -a "$LOGFILE"
-    ssh_rc=${PIPESTATUS[0]}
-  else
-    key="${HOST_SSH_KEY_PATH[$host]}"
-    user="${HOST_SSH_USER[$host]}"
-    q_script=$(shell_quote "$BECOME_SCRIPT")
-    remote_cmd="sudo -H -- /bin/bash -c ${q_script}"
-    ssh "${SSH_VERBOSITY_OPTS[@]}" -tt -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
-      -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
-      "${user}@${address}" "$remote_cmd" 2>&1 |
-      process_become_output "$marker" "$status_file" | tee -a "$LOGFILE"
-    ssh_rc=${PIPESTATUS[0]}
-  fi
-
-  while read -r idx rc; do
-    if [[ "$idx" == "$expected" && "$rc" =~ ^[0-9]+$ && "$rc" -le 255 ]]; then
-      if (( rc != 0 )); then
-        NONZERO_COUNT=$((NONZERO_COUNT+1))
-      fi
-      expected=$((expected+1))
-    else
-      echo "ERROR: Invalid command status sequence from ${address}." | tee -a "$LOGFILE" >&2
-      BECOME_ERROR=1
-      break
-    fi
-  done < "$status_file"
-
-  if (( expected < ${#CMDS[@]} )); then
-    SKIPPED_COUNT=$((SKIPPED_COUNT + ${#CMDS[@]} - expected))
-    echo "ERROR: ${address}: ${#CMDS[@]} command(s) requested; only ${expected} status(es) confirmed. Remaining outcomes unknown." | tee -a "$LOGFILE" >&2
-    BECOME_ERROR=1
-  fi
-  if (( ssh_rc != 0 )); then
-    echo "ERROR: ${address}: SSH/sudo session returned exit_status=${ssh_rc}." | tee -a "$LOGFILE" >&2
-    BECOME_ERROR=1
-  fi
-  [[ "$BECOME_ERROR" -eq 0 ]]
-}
-
-# Process newline-delimited result markers, but also flush incomplete lines
-# promptly so an interactive sudo/PAM prompt WITHOUT a newline remains visible.
-process_become_output() {
-  local marker="$1" status_file="$2" chunk pending='' remainder idx rc read_rc
-  while :; do
-    chunk=''
-    IFS= read -r -t 0.2 chunk
-    read_rc=$?
-    pending+="$chunk"
-    if (( read_rc == 0 )); then
-      pending="${pending%$'\r'}"
-      if [[ "$pending" == "$marker"* ]]; then
-        remainder="${pending#"$marker"}"
-        if [[ "$remainder" =~ ^([0-9]+):([0-9]+)$ ]]; then
-          idx="${BASH_REMATCH[1]}"
-          rc="${BASH_REMATCH[2]}"
-          printf '%s %s\n' "$idx" "$rc" >> "$status_file"
-          printf '%s\n' "--- exit_status=${rc} ---"
-          pending=''
-          continue
-        fi
-      fi
-      printf '%s\n' "$pending"
-      pending=''
-    elif (( read_rc == 1 )); then
-      [[ -z "$pending" ]] || printf '%s' "$pending"
-      break
-    elif [[ -n "$pending" && "$marker" != "$pending"* ]]; then
-      # Timeout: show partially received output (e.g. "Password:") but
-      # keep an incomplete status marker buffered until newline or EOF.
-      printf '%s' "$pending"
-      pending=''
-    fi
-  done
+command_starts_with_sudo() {
+  local command="$1"
+  [[ "$command" =~ ^[[:space:]]*sudo([[:space:]]|$) ]]
 }
 
 # Reports the literal exit status of every command, neutrally, with no
@@ -699,33 +536,46 @@ run_all() {
 
   for host in "${SELECTED_HOSTS[@]}"; do
     address=$(connection_address "$host")
-    if [[ "$(become_for_host "$host")" == "true" ]]; then
-      run_become_host "$host" "$address" || true
-      continue
-    fi
+
     for idx in "${!CMDS[@]}"; do
       c="${CMDS[$idx]}"
       echo "=== ${address} — ${c} — $(date -u +%FT%TZ) ===" | tee -a "$LOGFILE"
 
-      if [ "$host" == "localhost" ]; then
+      if [[ "$host" == "localhost" ]]; then
         bash -c "$c" 2>&1 | tee -a "$LOGFILE"
+        rc=${PIPESTATUS[0]}
       else
         key="${HOST_SSH_KEY_PATH[$host]}"
         user="${HOST_SSH_USER[$host]}"
-        ssh "${SSH_VERBOSITY_OPTS[@]}" -n -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
-          -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
-          "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
+
+        if command_starts_with_sudo "$c"; then
+          if [[ ! -t 0 ]]; then
+            echo "ERROR: ${address}: command begins with sudo and requires an interactive terminal for sudo/PAM authentication." | tee -a "$LOGFILE" >&2
+            SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            rc=1
+          else
+            ssh "${SSH_VERBOSITY_OPTS[@]}" -t -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
+              -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
+              "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
+            rc=${PIPESTATUS[0]}
+          fi
+        else
+          ssh "${SSH_VERBOSITY_OPTS[@]}" -n -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
+            -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
+            "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
+          rc=${PIPESTATUS[0]}
+        fi
       fi
 
-      rc=${PIPESTATUS[0]}
       echo "--- exit_status=${rc} ---" | tee -a "$LOGFILE"
-      if [ "$rc" -ne 0 ]; then
+      if (( rc != 0 )); then
         NONZERO_COUNT=$((NONZERO_COUNT + 1))
       fi
       echo | tee -a "$LOGFILE"
-      # SSH reserves 255 for errors, though remote commands may also return
-      # 255. Treat it as ambiguous and skip further commands on this node;
-      # never replay potentially side-effecting commands automatically.
+
+      # OpenSSH uses 255 for transport/authentication errors, although a remote
+      # command may also deliberately return 255. Treat it as ambiguous and do
+      # not retry or continue commands on this node automatically.
       if [[ "$host" != localhost && "$rc" -eq 255 ]]; then
         echo "WARNING: ${address}: SSH returned 255 (transport/authentication failure or remote exit 255). Skipping remaining commands on this node; outcome may be uncertain." | tee -a "$LOGFILE" >&2
         TRANSPORT_ERROR=1
@@ -766,7 +616,7 @@ main() {
 
   echo "Log saved: $LOGFILE"
   echo "${NONZERO_COUNT} command(s) returned a non-zero exit status; ${SKIPPED_COUNT} command(s) skipped or unconfirmed."
-  if [[ "$BECOME_ERROR" -ne 0 || "$TRANSPORT_ERROR" -ne 0 ]]; then
+  if [[ "$TRANSPORT_ERROR" -ne 0 ]]; then
     exit 1
   fi
   exit 0

@@ -9,16 +9,20 @@ A lightweight Bash command runner for executing reviewed commands locally or acr
 - Run an individual command (`-c`) or a line-oriented command file (`-f`).
 - Target localhost (the default), selected nodes (`-n`), or all nodes (`-a`).
 - Connect by configured hostname by default or IP address (`-ip`).
-- Global and per-node SSH usernames, private-key paths, and `become` settings.
-- Optional interactive sudo (`--become`), respecting each server's sudo/PAM policy.
-- SSH agent support for passphrase-protected keys; no sudo credentials stored by Runner.
-- Explicit confirmation before commands run (unless `-y` is selected).
+- Global and per-node SSH usernames and private-key paths.
+- SSH agent support for passphrase-protected keys.
+- Commands are executed exactly as written.
+- Remote commands beginning with `sudo` automatically get an interactive PTY so the server can present its normal sudo/PAM challenge.
+- SSH is quiet by default; `-v` / `--verbose` enables diagnostics.
+- Explicit confirmation before commands run unless `-y` is selected.
 - Per-command exit status and uniquely created private log files.
 - **Data-only `runner.cfg`** — no shell sourcing or execution of configuration.
 
 ## Requirements
 
-**To run:** Bash 4.3+, OpenSSH client tools (`ssh`, `ssh-agent`, `ssh-add`, `ssh-keygen`) and standard Linux utilities including GNU `stat`, `mktemp`, `tee`, `date` and `sort`. Runner executes on a Linux workstation or administration host and is independent of remote Linux distributions. Remote hosts need an SSH server, a shell, and `sudo` only if `become` is enabled.
+**To run:** Bash 4.3+, OpenSSH client tools (`ssh`, `ssh-agent`, `ssh-add`, `ssh-keygen`) and standard Linux utilities including GNU `stat`, `mktemp`, `tee`, `date` and `sort`. Runner executes on a Linux workstation or administration host and is independent of remote Linux distributions.
+
+Remote hosts need an SSH server and a shell. `sudo` is needed only for commands that explicitly use `sudo`.
 
 **For one-time migration only:** Python 3 (standard library, no third-party packages). Python is not used by `runner.sh`.
 
@@ -43,51 +47,42 @@ Edit `runner.cfg` for your environment. Example IP addresses and hostnames are f
 ssh_user = deploy
 ssh_key_path = ~/.ssh/id_ed25519
 log_dir = ~/.local/state/runner
-become = false
 
 [node:1]
 ip = 192.0.2.10
 hostname = node1.example.com
 role = Application server
-become = true
 
 [node:2]
 ip = 198.51.100.20
 hostname = node2.example.com
 ssh_user = ops
 ssh_key_path = ~/.ssh/id_ed25519_ops
-# become omitted: inherits global false
+role = Database server
 ```
 
-- `[global]`: required `ssh_user` and `ssh_key_path`; optional `log_dir` and `become`.
-- `[node:N]`: numeric ID with required `ip` and `hostname`; optional `ssh_user`, `ssh_key_path`, `role` and `become`.
-- Missing node values inherit global defaults; global `become` defaults to `false`.
-- Only literal `true` or `false` are accepted for `become`.
+- `[global]`: required `ssh_user` and `ssh_key_path`; optional `log_dir`.
+- `[node:N]`: numeric ID with required `ip` and `hostname`; optional `ssh_user`, `ssh_key_path` and `role`.
+- Missing node SSH values inherit the global defaults.
 - Only full-line `#` or `;` comments are supported. Do not enclose values in quotes or append inline comments.
-- Paths must be absolute or begin with `~/`, which Runner expands to its user's home directory. Other variables (including `$HOME`) and shell expressions are **not evaluated**.
+- Paths must be absolute or begin with `~/`, which Runner expands to its user's home directory. Other variables and shell expressions are **not evaluated**.
 - `runner.cfg` must be a regular file, not a symlink, owned by the current user or root, readable by Runner, and inaccessible to group/others. Use `chmod 600 runner.cfg`.
 
 ### Migrating an existing Bash-style `runner.cfg`
 
-**Do not source or execute the old configuration to convert it.** Use the included one-time converter, which reads supported assignments and arrays as text.
-
-From the repository directory:
+Use the included converter. It reads supported legacy assignments and arrays as text and **never executes the old configuration**.
 
 ```bash
-# Keep the original untouched until you have reviewed the conversion.
 python3 tools/migrate-config.py runner.cfg --output runner.cfg.new
 cat runner.cfg.new
 
-# Preserve a private, local backup (excluded from Git).
 cp -p runner.cfg "runner.cfg.$(date +%Y%m%d_%H%M%S).bak"
 mv runner.cfg.new runner.cfg
 chmod 600 runner.cfg
 ./runner.sh -l
 ```
 
-The converter supports the recent `NODE_INVENTORY` array (four or five pipe-separated fields), optional `NODE_ROLE`, and an older `NODE_MAP`/`NODE_HOSTNAME` array layout. It recognizes `${HOME}/` and `$HOME/` and converts those path prefixes to `~/`. **It rejects unsupported Bash syntax instead of evaluating it.** Complex legacy configurations require manual migration. It never overwrites an existing destination.
-
-After conversion, test with `-l` and a local command before targeting servers. Keep your private backup outside public Git history.
+Legacy BECOME fields are intentionally omitted during migration. Runner no longer manages privilege escalation. Put `sudo` directly in the command when root privileges are required.
 
 ## Usage
 
@@ -100,49 +95,57 @@ After conversion, test with `-l` and a local command before targeting servers. K
 ./runner.sh -n 1 -c 'uptime'                      # node by ID
 ./runner.sh -v -n 1 -c 'uptime'                   # verbose SSH diagnostics
 ./runner.sh -n node1.example.com -c 'uptime'      # node by name
-./runner.sh -n 1 2 -c 'date'                    # multiple nodes
+./runner.sh -n 1 2 -c 'date'                      # multiple nodes
 ./runner.sh -a -f checks/system-info.txt          # every configured remote node
 ./runner.sh -a -ip -f checks/system-info.txt      # connect using IP addresses
-./runner.sh -n 1 --become -c 'id -u'               # force sudo
-./runner.sh -n 1 --no-become -c 'id -un'           # override configured become
+./runner.sh -n 1 -c 'sudo id -u'                  # explicit sudo
 ```
 
 Flags may appear in any order. `-n` accepts configured node IDs, hostnames and IP addresses. `-a` includes all remote nodes, not localhost. By default, Runner runs locally without SSH. `-ip` changes only the destination address, not credentials.
 
-### Sudo / BECOME
+## Sudo
 
-Runner controls **whether** to use sudo; each server decides **how** to authenticate (password, TOTP, PAM policy, or an existing sudo timestamp).
+Runner does not decide which commands require root and does not prepend `sudo`.
 
-- Normal mode: one SSH connection per command, as in earlier versions.
-- Become mode: one interactive SSH PTY session and one sudo invocation per target/run; each command runs in its own Bash subshell and retains a separate exit status.
-- `--become` (or `-b`) forces sudo; `--no-become` disables automatic sudo; otherwise each node inherits its configured setting.
-- Become mode requires a terminal and trusted administrator rights sufficient to execute an arbitrary root Bash command. It is **not** suitable for narrowly scoped sudo command allowlists.
-- Runner never requests sudo credentials through its own configuration or captures keystrokes; remote PAM prompts are passed through SSH. Sensitive data printed by commands may still be logged.
-- No Runner-managed credential cache, sudoers modification, or long-running privileged agent is introduced.
+Commands are executed exactly as written:
 
-See [Privilege escalation design](docs/PRIVILEGE-ESCALATION.md) for implications and an **optional** four-hour sudo timestamp example. That setting is server-side and is **not** the default.
+```text
+date
+uname -a
+sudo systemctl restart nginx
+uptime
+```
 
-### Execution, SSH failures and logs
+For remote commands whose first command word is `sudo`, Runner requests a PTY so the remote server can display its normal sudo/PAM prompt. The server decides whether authentication requires a password, TOTP, another PAM method, or no prompt because an existing sudo timestamp is valid.
 
-Every non-empty, non-comment line of a `-f` file is executed as an independent command; shell state does not persist across lines. Review command files first. The confirmation screen displays selected targets, commands and whether become is enabled.
+Runner does not store sudo passwords, TOTP codes, or sudo session state.
 
-SSH is quiet by default (`-q`); use `-v` or `--verbose` to enable OpenSSH diagnostic output when troubleshooting. This applies to both normal and BECOME connections. Verbose output can expose connection details and is included in logs; use it intentionally. Server-generated command output is unaffected by the quiet flag.
+To keep the implementation simple, automatic PTY detection applies only when `sudo` is the first command word after optional whitespace. Runner does not attempt to parse arbitrary shell grammar.
 
-SSH forwarding of X11, the agent, and extra configured forwards is explicitly disabled. Runner retains OpenSSH's normal host-key verification policy. SSH identities and host authentication behavior otherwise remain unchanged.
+See [Sudo and Runner](docs/SUDO.md) for additional notes, including an optional server-side sudo timestamp example.
 
-Runner **never automatically retries commands**. In normal mode, if an SSH connection returns `255`, Runner stops additional commands on that node, continues with remaining nodes, and exits non-zero. SSH return code `255` can also come from a remote command, so the result is marked **ambiguous**, not a confirmed transport error. If a become-mode session terminates unexpectedly, command results without status markers are similarly **unconfirmed**. Don't blindly repeat commands with side effects.
+## Execution, SSH failures and logs
 
-Other non-zero command statuses are reported without automatically categorizing them as errors. The overall exit code is non-zero for SSH-255 uncertainty or become-session failure, but not simply because an ordinary command returned a non-zero status.
+Every non-empty, non-comment line of a `-f` file is executed as an independent command; shell state does not persist across lines. Review command files first.
+
+SSH is quiet by default (`-q`). Use `-v` or `--verbose` to enable OpenSSH diagnostic output when troubleshooting.
+
+SSH forwarding of X11, the agent, and extra configured forwards is explicitly disabled. Runner retains OpenSSH's normal host-key verification behavior.
+
+Runner **never automatically retries commands**. If SSH returns `255`, Runner stops additional commands on that node, continues with remaining nodes, and reports the result as ambiguous because a remote command can also deliberately return `255`.
+
+Other non-zero command statuses are reported literally. Runner does not try to interpret a remote program's meaning.
 
 Log files are created uniquely using `mktemp` with permission `0600` in a private `LOG_DIR` (default `~/.local/state/runner`, required mode `0700`, owned by the Runner user). Log files can contain operational and command-output secrets; handle retention accordingly.
 
 ## Security and limitations
 
-- No config file is executed. The parser does not expand environment variables or shell syntax.
-- Keep private inventories, SSH private keys, operational checks and logs out of Git. Review staged files even with `.gitignore`.
-- Do not enable `--become` or automatic become with untrusted commands. `-y` skips only Runner's confirmation, not sudo authentication.
-- Config permission validation and private log directories mitigate common local risks but do not replace host hardening, sudo policies, trusted source code or a protected working directory.
-- Remote SSH user/password policies and `sudo`/PAM policy remain server responsibilities. Runner itself currently uses configured SSH private-key identities for remote connections.
+- No config file is executed. The parser does not expand shell syntax.
+- Keep private inventories, SSH private keys, operational checks and logs out of Git.
+- Runner executes reviewed commands exactly as supplied; it is not a command policy engine or sandbox.
+- `-y` skips Runner's confirmation prompt. Use it only with reviewed commands.
+- Remote SSH policy and sudo/PAM policy remain server responsibilities.
+- Runner uses configured SSH private-key identities for remote connections.
 
 ## Offline checks
 
@@ -155,7 +158,7 @@ bash tests/offline-smoke.sh
 shellcheck -s bash runner.sh
 ```
 
-The smoke tests use simulated `ssh` and `sudo` commands and do **not** connect to real servers.
+The smoke tests use a simulated `ssh` command and do **not** connect to real servers.
 
 ## Project layout
 
@@ -170,7 +173,7 @@ runner/
 ├── checks/
 │   └── system-info.txt
 ├── docs/
-│   └── PRIVILEGE-ESCALATION.md
+│   └── SUDO.md
 ├── .gitignore
 ├── LICENSE
 └── README.md
