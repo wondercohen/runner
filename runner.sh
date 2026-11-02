@@ -7,63 +7,146 @@
 # Copyright (c) 2026 Wonder Cohen B.V. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# IMPORTANT: runner.cfg is sourced as Bash code. Only use trusted config files.
+# runner.cfg is parsed as plain data; it is never sourced or executed.
 
 set -u
 set -o pipefail
 
 package="runner"
-VERSION="1.0.1"
+VERSION="1.1.0"
 # Restrict permissions on generated log files.
 umask 077
 # Configuration is relative to the script, not the current working directory.
 CONFIG_FILE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/runner.cfg"
 
+# Trim surrounding horizontal whitespace without invoking shell evaluation.
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+config_error() {
+  printf 'ERROR: %s:%s: %s\n' "$CONFIG_FILE" "$1" "$2" >&2
+  exit 1
+}
+
+# Only ~ and ~/... have special meaning in paths. NO shell-variable expansion.
+expand_config_path() {
+  case "$1" in
+    '~') printf '%s\n' "$HOME" ;;
+    \~/*) printf '%s/%s\n' "$HOME" "${1:2}" ;;
+    /*) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Validate local config ownership and confidentiality before parsing it.
+# GNU stat is standard on the Linux workstation where Runner is installed.
+validate_private_file() {
+  local file="$1" mode owner numeric_mode
+  if [[ ! -f "$file" || ! -r "$file" || -L "$file" ]]; then
+    echo "ERROR: Configuration must be a readable regular file, not a symlink: $file" >&2
+    exit 1
+  fi
+  mode=$(stat -c %a -- "$file") || exit 1
+  owner=$(stat -c %u -- "$file") || exit 1
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    echo "ERROR: Cannot validate configuration permissions: $file" >&2
+    exit 1
+  fi
+  numeric_mode=$((8#$mode))
+  if (( (numeric_mode & 077) != 0 )) || [[ "$owner" != "$(id -u)" && "$owner" != "0" ]]; then
+    echo "ERROR: runner.cfg must be owned by this user (or root), and inaccessible to group/others (chmod 600): $file" >&2
+    exit 1
+  fi
+}
+
+# Strict, data-only section configuration. No source, eval, interpolation,
+# external parser, or executable declarations are involved.
 load_config() {
-  if [[ ! -f "$CONFIG_FILE" || ! -r "$CONFIG_FILE" ]]; then
-    echo "ERROR: Configuration not readable: $CONFIG_FILE" >&2
-    exit 1
-  fi
+  validate_private_file "$CONFIG_FILE"
 
-  # runner.cfg is Bash code: use only a trusted, locally maintained file.
-  source "$CONFIG_FILE"
-  if [[ -z "${SSH_KEY_PATH:-}" || -z "${SSH_USER:-}" ]] || ! declare -p NODE_INVENTORY &>/dev/null; then
-    echo "ERROR: Missing SSH_KEY_PATH, SSH_USER or NODE_INVENTORY in $CONFIG_FILE" >&2
-    exit 1
-  fi
+  SSH_USER=''
+  SSH_KEY_PATH=''
+  LOG_DIR=''
+  declare -gA NODE_MAP=() NODE_HOSTNAME=() HOST_SSH_KEY_PATH=() HOST_SSH_USER=() NODE_ROLE=()
+  local line section='' node='' key value lineno=0 identity section_name address
+  local -A seen_section=() seen_key=()
 
-  LOG_DIR="${LOG_DIR:-${HOME}/.local/state/runner}"
-  LOGFILE="${LOG_DIR%/}/runner_$(date +%Y%m%d_%H%M%S).log"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    ((lineno+=1))
+    line="${line%$'\r'}"
+    line=$(trim "$line")
+    [[ -z "$line" || "$line" == \#* || "$line" == \;* ]] && continue
 
-  # Derived lookup arrays are kept for compatibility with node resolution.
-  declare -gA NODE_MAP=() NODE_HOSTNAME=() HOST_SSH_KEY_PATH=() HOST_SSH_USER=()
-  local label record ip name key user extra prior
-  for label in "${!NODE_INVENTORY[@]}"; do
-    record="${NODE_INVENTORY[$label]}"
-    IFS='|' read -r ip name key user extra <<< "$record"
-    if [[ ! "$label" =~ ^[0-9]+$ || -z "$ip" || -z "$name" || -n "${extra:-}" || "$record" != *'|'*'|'*'|'* ]]; then
-      echo "ERROR: Invalid node inventory record [$label]: $record" >&2
-      exit 1
+    if [[ "$line" == \[*\] ]]; then
+      if [[ "$line" == '[global]' ]]; then
+        section='global'; node=''; section_name='global'
+      elif [[ "$line" =~ ^\[node:([0-9]+)\]$ ]]; then
+        section='node'; node="${BASH_REMATCH[1]}"; section_name="node:$node"
+      else
+        config_error "$lineno" "Invalid section [$line] (expected [global] or [node:N])."
+      fi
+      [[ -z "${seen_section[$section_name]:-}" ]] || config_error "$lineno" "Duplicate section: $section_name"
+      seen_section[$section_name]=1
+      continue
     fi
+
+    [[ -n "$section" && "$line" == *=* ]] || config_error "$lineno" 'Expected section header or key = value.'
+    key=$(trim "${line%%=*}")
+    value=$(trim "${line#*=}")
+    [[ "$key" =~ ^[a-z_]+$ ]] || config_error "$lineno" "Invalid setting name: $key"
+    identity="$section_name:$key"
+    [[ -z "${seen_key[$identity]:-}" ]] || config_error "$lineno" "Duplicate setting: $identity"
+    seen_key[$identity]=1
+    [[ ! "$value" =~ [[:cntrl:]] ]] || config_error "$lineno" 'Control character in configuration value.'
+
+    if [[ "$section" == global ]]; then
+      case "$key" in
+        ssh_user) SSH_USER="$value" ;;
+        ssh_key_path) SSH_KEY_PATH="$value" ;;
+        log_dir) LOG_DIR="$value" ;;
+        *) config_error "$lineno" "Unknown global setting: $key" ;;
+      esac
+    else
+      case "$key" in
+        ip) NODE_MAP[$node]="$value" ;;
+        hostname) NODE_HOSTNAME[$node]="$value" ;;
+        ssh_user) HOST_SSH_USER[$node]="$value" ;;
+        ssh_key_path) HOST_SSH_KEY_PATH[$node]="$value" ;;
+        role) NODE_ROLE[$node]="$value" ;;
+        *) config_error "$lineno" "Unknown node setting: $key" ;;
+      esac
+    fi
+  done < "$CONFIG_FILE"
+
+  [[ -n "${seen_section[global]:-}" ]] || config_error 'EOF' 'Missing [global] section.'
+  [[ -n "$SSH_USER" && -n "$SSH_KEY_PATH" ]] || config_error 'EOF' 'Missing global ssh_user or ssh_key_path.'
+  [[ "$SSH_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]] || config_error 'EOF' 'Invalid global SSH user.'
+  SSH_KEY_PATH=$(expand_config_path "$SSH_KEY_PATH") || config_error 'EOF' 'Global ssh_key_path must be absolute or begin with ~/.'
+  LOG_DIR=$(expand_config_path "${LOG_DIR:-~/.local/state/runner}") || config_error 'EOF' 'log_dir must be absolute or begin with ~/.'
+  (( ${#NODE_MAP[@]} > 0 )) || config_error 'EOF' 'No nodes defined.'
+
+  local label prior
+  for label in "${!seen_section[@]}"; do
+    [[ "$label" == node:* ]] || continue
+    node="${label#node:}"
+    address="${NODE_MAP[$node]:-}"
+    [[ -n "$address" && -n "${NODE_HOSTNAME[$node]:-}" ]] || config_error 'EOF' "Node $node missing ip or hostname."
+    [[ "$address" =~ ^[a-zA-Z0-9][a-zA-Z0-9:._-]*$ ]] || config_error 'EOF' "Invalid IP/address for node $node."
+    [[ "${NODE_HOSTNAME[$node]}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || config_error 'EOF' "Invalid hostname for node $node."
     for prior in "${!NODE_MAP[@]}"; do
-      if [[ "${NODE_MAP[$prior]}" == "$ip" || "${NODE_HOSTNAME[$prior]}" == "$name" ]]; then
-        echo "ERROR: Duplicate IP or hostname in node [$label] and [$prior]." >&2
-        exit 1
+      [[ "$prior" == "$node" ]] && continue
+      if [[ "${NODE_MAP[$prior]}" == "$address" || "${NODE_HOSTNAME[$prior]}" == "${NODE_HOSTNAME[$node]}" ]]; then
+        config_error 'EOF' "Duplicate node address or hostname: $node and $prior."
       fi
     done
-    NODE_MAP[$label]="$ip"
-    NODE_HOSTNAME[$label]="$name"
-    HOST_SSH_KEY_PATH[$label]="${key:-$SSH_KEY_PATH}"
-    HOST_SSH_USER[$label]="${user:-$SSH_USER}"
-    if [[ ! "${HOST_SSH_USER[$label]}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-      echo "ERROR: Invalid SSH username for node [$label]." >&2
-      exit 1
-    fi
+    HOST_SSH_USER[$node]="${HOST_SSH_USER[$node]:-$SSH_USER}"
+    [[ "${HOST_SSH_USER[$node]}" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]] || config_error 'EOF' "Invalid SSH user for node $node."
+    HOST_SSH_KEY_PATH[$node]=$(expand_config_path "${HOST_SSH_KEY_PATH[$node]:-$SSH_KEY_PATH}") || config_error 'EOF' "Invalid SSH key path for node $node."
   done
-  if (( ${#NODE_MAP[@]} == 0 )); then
-    echo "ERROR: NODE_INVENTORY is empty in $CONFIG_FILE" >&2
-    exit 1
-  fi
 }
 
 # Selected targets are stored as stable node IDs (not IPs or hostnames).
@@ -86,8 +169,12 @@ FILE=""
 SKIP_CONFIRM=0
 ALL_REMOTE=0
 USE_IP=0
+# SSH diagnostics are hidden by default. -v/--verbose enables OpenSSH debug output.
+SSH_VERBOSITY_OPTS=(-q)
 NONZERO_COUNT=0
 STARTED_SSH_AGENT=0
+SKIPPED_COUNT=0
+TRANSPORT_ERROR=0
 
 # ---------- SSH agent handling ----------
 # Scoped to this script's own process tree only — it cannot persist back into
@@ -132,6 +219,8 @@ ensure_ssh_agent() {
   fi
 }
 
+# ShellCheck cannot detect that cleanup is invoked by the EXIT trap.
+# shellcheck disable=SC2317
 cleanup() {
   if [ "$STARTED_SSH_AGENT" -eq 1 ]; then
     ssh-agent -k >/dev/null 2>&1 || true
@@ -167,24 +256,28 @@ list_nodes() {
 
 usage() {
   echo "$package - run a reviewed command set on localhost or across configured SSH nodes"
-  echo "Node inventory, SSH users and SSH keys are configured in $CONFIG_FILE"
+  echo "Node inventory, SSH users and SSH keys are configured in $CONFIG_FILE (data-only sections)"
   echo " "
   echo "$package [options]   (flags may be given in any order)"
   echo " "
   echo "options:"
   echo "-h, --help                           show this help"
   echo "-V, --version                        show version and exit"
+  echo "-v, --verbose                        show SSH diagnostics (default: quiet)"
   echo "-l, --list                           list known nodes and exit"
   echo "-c, --cmd=\"<command>\"               run one ad-hoc command"
   echo "-f, --file=<path>                    run every command line in <path>"
   echo "-n, --node=<hostname|N|ip> [...]  target one or more nodes; repeat -n or"
   echo "                                      list multiple targets after one -n"
-  echo "-a, --all                            target all known remote Git nodes"
+  echo "-a, --all                            target all configured remote nodes"
   echo "-ip, --ip                            connect by IP instead of hostname"
   echo "-y, --yes                            skip the confirmation prompt (use sparingly)"
   echo " "
   echo "Default target (no -a, no -n): localhost, run directly with bash — no SSH involved."
   echo "Remote connections use NODE_HOSTNAME unless -ip is specified."
+  echo "SSH runs quietly by default; -v/--verbose enables OpenSSH debug output."
+  echo "Commands are executed exactly as written."
+  echo "Remote commands beginning with sudo get a PTY so sudo/PAM can prompt interactively."
   echo " "
   echo "A -f file is line-oriented: each non-empty, non-comment line is an independent"
   echo "command. Shell state such as cd, variables, and shell options does not persist"
@@ -198,12 +291,14 @@ usage() {
   echo "Examples:"
   echo "  $package --version"
   echo "  $package -l"
+  echo "  $package -v -n 1 -c 'hostname'"
   echo "  $package -c \"pwd\""
   echo "  $package -f checks/system-info.txt"
   echo "  $package -c \"hostname\" -a"
   echo "  $package -n 1 -f checks/system-info.txt"
   echo "  $package -n 1 localhost -c \"hostname\""
   echo "  $package -a -ip -f checks/system-info.txt"
+  echo "  $package -n 1 -c 'sudo id -u'"
 }
 
 # ---------- Node resolution ----------
@@ -216,7 +311,7 @@ resolve_node() {
     return 0
   fi
 
-  if [[ -n "${NODE_MAP[$input]:-}" ]]; then
+  if [[ "$input" =~ ^[0-9]+$ && -n "${NODE_MAP[$input]:-}" ]]; then
     printf '%s\n' "$input"
     return 0
   fi
@@ -307,6 +402,10 @@ parse_args() {
         append_host_unique "$resolved"
         shift
         ;;
+      -v|--verbose)
+        SSH_VERBOSITY_OPTS=(-v)
+        shift
+        ;;
       -a|--all)
         ALL_REMOTE=1
         shift
@@ -368,16 +467,23 @@ apply_defaults_and_validate() {
     exit 1
   fi
 
-  local log_dir="${LOGFILE%/*}"
-  # Create a private log directory only when a command is going to run.
-  if ! mkdir -p -m 700 -- "$log_dir"; then
-    echo "ERROR: Cannot create log directory: $log_dir" >&2
+  # Log files are uniquely created; reject shared or symlinked log folders.
+  if [[ -L "$LOG_DIR" ]] || ! mkdir -p -- "$LOG_DIR"; then
+    echo "ERROR: Unsafe or inaccessible log directory: $LOG_DIR" >&2
     exit 1
   fi
-  if [ ! -w "$log_dir" ]; then
-    echo "ERROR: Log directory is not writable: $log_dir" >&2
+  local dir_mode dir_owner
+  dir_mode=$(stat -c %a -- "$LOG_DIR") || exit 1
+  dir_owner=$(stat -c %u -- "$LOG_DIR") || exit 1
+  if [[ "$dir_owner" != "$(id -u)" ]] || (( (8#$dir_mode & 077) != 0 )); then
+    echo "ERROR: Log directory must be owned by the current user and private (chmod 700): $LOG_DIR" >&2
     exit 1
   fi
+  LOGFILE=$(mktemp "${LOG_DIR%/}/runner_$(date +%Y%m%d_%H%M%S)_XXXXXXXX") || {
+    echo 'ERROR: Cannot create private log file.' >&2
+    exit 1
+  }
+
 }
 
 # ---------- Confirmation ----------
@@ -407,6 +513,18 @@ confirm_run() {
 }
 
 # ---------- Execution ----------
+
+# Runner executes commands exactly as written. It does not decide what requires
+# root and does not prepend sudo. For remote commands whose first command word
+# is sudo, Runner requests a PTY so the remote sudo/PAM stack can prompt the
+# administrator directly. Other remote commands keep the original noninteractive
+# SSH path.
+
+command_starts_with_sudo() {
+  local command="$1"
+  [[ "$command" =~ ^[[:space:]]*sudo([[:space:]]|$) ]]
+}
+
 # Reports the literal exit status of every command, neutrally, with no
 # success/failure judgment attached. Non-zero is not automatically a failure.
 #
@@ -414,27 +532,56 @@ confirm_run() {
 # targets are reached over SSH as their configured SSH user.
 
 run_all() {
-  local host c rc key user address
+  local host c rc key user address idx
 
   for host in "${SELECTED_HOSTS[@]}"; do
     address=$(connection_address "$host")
-    for c in "${CMDS[@]}"; do
+
+    for idx in "${!CMDS[@]}"; do
+      c="${CMDS[$idx]}"
       echo "=== ${address} — ${c} — $(date -u +%FT%TZ) ===" | tee -a "$LOGFILE"
 
-      if [ "$host" == "localhost" ]; then
+      if [[ "$host" == "localhost" ]]; then
         bash -c "$c" 2>&1 | tee -a "$LOGFILE"
+        rc=${PIPESTATUS[0]}
       else
         key="${HOST_SSH_KEY_PATH[$host]}"
         user="${HOST_SSH_USER[$host]}"
-        ssh -q -n -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
+
+        if command_starts_with_sudo "$c"; then
+          if [[ ! -t 0 ]]; then
+            echo "ERROR: ${address}: command begins with sudo and requires an interactive terminal for sudo/PAM authentication." | tee -a "$LOGFILE" >&2
+            SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            rc=1
+          else
+            ssh "${SSH_VERBOSITY_OPTS[@]}" -t -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
+              -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
+              "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
+            rc=${PIPESTATUS[0]}
+          fi
+        else
+          ssh "${SSH_VERBOSITY_OPTS[@]}" -n -i "$key" -o IdentitiesOnly=yes -o ConnectTimeout=10 \
+            -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes \
+            "${user}@${address}" "$c" 2>&1 | tee -a "$LOGFILE"
+          rc=${PIPESTATUS[0]}
+        fi
       fi
 
-      rc=${PIPESTATUS[0]}
       echo "--- exit_status=${rc} ---" | tee -a "$LOGFILE"
-      if [ "$rc" -ne 0 ]; then
+      if (( rc != 0 )); then
         NONZERO_COUNT=$((NONZERO_COUNT + 1))
       fi
       echo | tee -a "$LOGFILE"
+
+      # OpenSSH uses 255 for transport/authentication errors, although a remote
+      # command may also deliberately return 255. Treat it as ambiguous and do
+      # not retry or continue commands on this node automatically.
+      if [[ "$host" != localhost && "$rc" -eq 255 ]]; then
+        echo "WARNING: ${address}: SSH returned 255 (transport/authentication failure or remote exit 255). Skipping remaining commands on this node; outcome may be uncertain." | tee -a "$LOGFILE" >&2
+        TRANSPORT_ERROR=1
+        SKIPPED_COUNT=$((SKIPPED_COUNT + ${#CMDS[@]} - idx - 1))
+        break
+      fi
     done
   done
 }
@@ -468,7 +615,10 @@ main() {
   run_all
 
   echo "Log saved: $LOGFILE"
-  echo "${NONZERO_COUNT} of $(( ${#SELECTED_HOSTS[@]} * ${#CMDS[@]} )) command run(s) returned a non-zero exit status — not necessarily a failure, see exit_status lines above."
+  echo "${NONZERO_COUNT} command(s) returned a non-zero exit status; ${SKIPPED_COUNT} command(s) skipped or unconfirmed."
+  if [[ "$TRANSPORT_ERROR" -ne 0 ]]; then
+    exit 1
+  fi
   exit 0
 }
 

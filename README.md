@@ -1,385 +1,164 @@
-# Runner
+# SSH Runner
 
-Runner is a lightweight Bash command runner for Linux administration. It executes one or more shell commands locally or over SSH on one, several, or all configured hosts. Commands can be supplied directly on the command line or from a reviewed, line-oriented command file.
+A lightweight Bash command runner for executing reviewed commands locally or across configured Linux servers using OpenSSH. It needs no Ansible installation, Python runtime, or agent on remote servers.
 
-Runner uses Bash, OpenSSH, and standard Unix utilities. It does not require Ansible, a Python runtime, or a remote agent.
+**Developed by Wonder Cohen B.V.**
 
-It is aimed at operational work that sits between repeated manual SSH sessions and a full automation or configuration-management platform.
+## Features
 
-Before execution, Runner prints the selected targets and command set for confirmation. During execution, it identifies each host and command, reports the command exit status, and writes the output to a timestamped local log.
-
-The execution model is deliberately close to the shell: configuration in one file, SSH for remote transport, and plain-text output that is straightforward to inspect, archive, or pass to other tools.
-
-Developed and maintained by **Wonder Cohen B.V.**
-
-## Use cases
-
-Runner is useful for operational work where repeated SSH sessions are cumbersome and a larger automation layer is unnecessary.
-
-Typical uses include:
-
-- System checks and validation
-- Troubleshooting and diagnostics
-- Audit and inventory collection
-- Service and configuration checks
-- Log and command-output collection
-- Administrative changes
-- Deployment or maintenance steps
-- Lab and test environments
-- Human-in-the-loop AI or LLM-assisted administration
-
-The commands define the operation. Runner provides target selection, execution, confirmation, status reporting, and logging.
+- Run an individual command (`-c`) or a line-oriented command file (`-f`).
+- Target localhost (the default), selected nodes (`-n`), or all nodes (`-a`).
+- Connect by configured hostname by default or IP address (`-ip`).
+- Global and per-node SSH usernames and private-key paths.
+- SSH agent support for passphrase-protected keys.
+- Commands are executed exactly as written.
+- Remote commands beginning with `sudo` automatically get an interactive PTY so the server can present its normal sudo/PAM challenge.
+- SSH is quiet by default; `-v` / `--verbose` enables diagnostics.
+- Explicit confirmation before commands run unless `-y` is selected.
+- Per-command exit status and uniquely created private log files.
+- **Data-only `runner.cfg`** — no shell sourcing or execution of configuration.
 
 ## Requirements
 
-Runner requires:
+**To run:** Bash 4.3+, OpenSSH client tools (`ssh`, `ssh-agent`, `ssh-add`, `ssh-keygen`) and standard Linux utilities including GNU `stat`, `mktemp`, `tee`, `date` and `sort`. Runner executes on a Linux workstation or administration host and is independent of remote Linux distributions.
 
-- Bash 4 or later
-- OpenSSH client tools: `ssh`, `ssh-agent`, `ssh-add`, and `ssh-keygen`
-- Standard Unix utilities used by the script
-- SSH access to remote hosts when remote execution is used
+Remote hosts need an SSH server and a shell. `sudo` is needed only for commands that explicitly use `sudo`.
 
-No installation is required on remote hosts beyond the SSH service and the commands you intend to run.
+**For one-time migration only:** Python 3 (standard library, no third-party packages). Python is not used by `runner.sh`.
 
 ## Installation
-
-Clone the repository:
 
 ```bash
 git clone https://github.com/wondercohen/runner.git
 cd runner
-```
-
-Create the local configuration:
-
-```bash
 cp runner.cfg.example runner.cfg
 chmod 700 runner.sh
 chmod 600 runner.cfg
 ```
 
-Edit `runner.cfg` for your environment.
+Edit `runner.cfg` for your environment. Example IP addresses and hostnames are fictional. Your actual `runner.cfg` is excluded from Git; **never commit local inventory or secrets**.
 
-Configuration lookup is relative to `runner.sh`, not to the current working directory.
+## Configuration (`runner.cfg`)
 
-## Configuration
-
-`runner.cfg` contains the host inventory, SSH defaults, optional per-host overrides, and log location.
-
-Example:
-
-```bash
-SSH_USER="deploy"
-SSH_KEY_PATH="${HOME}/.ssh/id_ed25519"
-LOG_DIR="${HOME}/.local/state/runner"
-
-declare -gA NODE_INVENTORY=(
-  [1]="192.0.2.10|node1.example.com||"
-  [2]="198.51.100.20|node2.example.com||"
-  [3]="203.0.113.30|node3.example.com|${HOME}/.ssh/id_ed25519_admin|admin"
-)
-
-declare -gA NODE_ROLE=(
-  [1]="Application server"
-  [2]="Database server"
-  [3]="Administration server"
-)
-```
-
-Each `NODE_INVENTORY` entry uses this format:
+`runner.cfg` is **plain data** with named sections, rather than executable Bash. Runner parses supported keys strictly and rejects unknown settings, missing required fields, malformed sections and unsafe file permissions. The filename remains `runner.cfg`.
 
 ```text
-IP_ADDRESS|NODE_HOSTNAME|HOST_SSH_KEY_PATH|HOST_SSH_USER
+[global]
+ssh_user = deploy
+ssh_key_path = ~/.ssh/id_ed25519
+log_dir = ~/.local/state/runner
+
+[node:1]
+ip = 192.0.2.10
+hostname = node1.example.com
+role = Application server
+
+[node:2]
+ip = 198.51.100.20
+hostname = node2.example.com
+ssh_user = ops
+ssh_key_path = ~/.ssh/id_ed25519_ops
+role = Database server
 ```
 
-An empty key or user field falls back to the global `SSH_KEY_PATH` or `SSH_USER`.
+- `[global]`: required `ssh_user` and `ssh_key_path`; optional `log_dir`.
+- `[node:N]`: numeric ID with required `ip` and `hostname`; optional `ssh_user`, `ssh_key_path` and `role`.
+- Missing node SSH values inherit the global defaults.
+- Only full-line `#` or `;` comments are supported. Do not enclose values in quotes or append inline comments.
+- Paths must be absolute or begin with `~/`, which Runner expands to its user's home directory. Other variables and shell expressions are **not evaluated**.
+- `runner.cfg` must be a regular file, not a symlink, owned by the current user or root, readable by Runner, and inaccessible to group/others. Use `chmod 600 runner.cfg`.
 
-`NODE_ROLE` is optional and is used only for the descriptive output of `runner.sh -l`.
+### Migrating an existing Bash-style `runner.cfg`
 
-The example inventory uses RFC 5737 documentation addresses and `example.com` hostnames.
-
-### Log directory
-
-The default example configuration uses:
-
-```bash
-LOG_DIR="${HOME}/.local/state/runner"
-```
-
-To store logs under `${HOME}/logs`, set:
+Use the included converter. It reads supported legacy assignments and arrays as text and **never executes the old configuration**.
 
 ```bash
-LOG_DIR="${HOME}/logs"
-```
+python3 tools/migrate-config.py runner.cfg --output runner.cfg.new
+cat runner.cfg.new
 
-Runner creates the configured log directory when it executes commands.
-
-## Usage
-
-Show help:
-
-```bash
-./runner.sh -h
-```
-
-List configured nodes:
-
-```bash
+cp -p runner.cfg "runner.cfg.$(date +%Y%m%d_%H%M%S).bak"
+mv runner.cfg.new runner.cfg
+chmod 600 runner.cfg
 ./runner.sh -l
 ```
 
-Run one command on localhost:
+Legacy BECOME fields are intentionally omitted during migration. Runner no longer manages privilege escalation. Put `sudo` directly in the command when root privileges are required.
+
+## Usage
 
 ```bash
-./runner.sh -c 'uptime'
+./runner.sh --version
+./runner.sh -h
+./runner.sh -l
+./runner.sh -c 'hostname'                         # localhost
+./runner.sh -f checks/system-info.txt             # localhost
+./runner.sh -n 1 -c 'uptime'                      # node by ID
+./runner.sh -v -n 1 -c 'uptime'                   # verbose SSH diagnostics
+./runner.sh -n node1.example.com -c 'uptime'      # node by name
+./runner.sh -n 1 2 -c 'date'                      # multiple nodes
+./runner.sh -a -f checks/system-info.txt          # every configured remote node
+./runner.sh -a -ip -f checks/system-info.txt      # connect using IP addresses
+./runner.sh -n 1 -c 'sudo id -u'                  # explicit sudo
 ```
 
-Run multiple commands on localhost:
+Flags may appear in any order. `-n` accepts configured node IDs, hostnames and IP addresses. `-a` includes all remote nodes, not localhost. By default, Runner runs locally without SSH. `-ip` changes only the destination address, not credentials.
 
-```bash
-./runner.sh -c 'date' -c 'uptime'
-```
+## Sudo
 
-Run a command on one remote host:
+Runner does not decide which commands require root and does not prepend `sudo`.
 
-```bash
-./runner.sh -n 1 -c 'uptime'
-```
-
-Select a host by configured hostname:
-
-```bash
-./runner.sh -n node1.example.com -c 'uptime'
-```
-
-Select multiple hosts:
-
-```bash
-./runner.sh -n 1 2 -c 'uptime'
-```
-
-Run multiple commands on multiple hosts:
-
-```bash
-./runner.sh -n 1 2 -c 'date' -c 'uptime'
-```
-
-Run a command file on all configured remote hosts:
-
-```bash
-./runner.sh -a -f checks/system-info.txt
-```
-
-Connect by configured IP address instead of hostname:
-
-```bash
-./runner.sh -a -ip -f checks/system-info.txt
-```
-
-Include localhost together with remote targets:
-
-```bash
-./runner.sh -n 1 localhost -c 'date'
-```
-
-Skip the confirmation prompt:
-
-```bash
-./runner.sh -n 1 -c 'uptime' -y
-```
-
-### Options
-
-`-h`, `--help`
-Show help.
-
-`-l`, `--list`
-List configured remote nodes.
-
-`-c`, `--cmd`
-Add an ad-hoc command. Repeat the option to add multiple commands.
-
-`-f`, `--file`
-Read commands from a file.
-
-`-n`, `--node`
-Select one or more nodes by numeric ID, configured hostname, or configured IP address.
-
-`-a`, `--all`
-Add all configured remote nodes to the target set.
-
-`-ip`, `--ip`
-Connect to remote nodes by configured IP address instead of hostname.
-
-`-y`, `--yes`
-Run without the confirmation prompt.
-
-Flags can be supplied in different orders.
-
-If neither `-n` nor `-a` selects a target, Runner uses `localhost` and executes commands directly with Bash.
-
-## Command files
-
-A command file contains one command per non-empty, non-comment line.
-
-Example `checks/system-info.txt`:
+Commands are executed exactly as written:
 
 ```text
 date
 uname -a
+sudo systemctl restart nginx
 uptime
 ```
 
-Run it locally:
+For remote commands whose first command word is `sudo`, Runner requests a PTY so the remote server can display its normal sudo/PAM prompt. The server decides whether authentication requires a password, TOTP, another PAM method, or no prompt because an existing sudo timestamp is valid.
+
+Runner does not store sudo passwords, TOTP codes, or sudo session state.
+
+To keep the implementation simple, automatic PTY detection applies only when `sudo` is the first command word after optional whitespace. Runner does not attempt to parse arbitrary shell grammar.
+
+See [Sudo and Runner](docs/SUDO.md) for additional notes, including an optional server-side sudo timestamp example.
+
+## Execution, SSH failures and logs
+
+Every non-empty, non-comment line of a `-f` file is executed as an independent command; shell state does not persist across lines. Review command files first.
+
+SSH is quiet by default (`-q`). Use `-v` or `--verbose` to enable OpenSSH diagnostic output when troubleshooting.
+
+SSH forwarding of X11, the agent, and extra configured forwards is explicitly disabled. Runner retains OpenSSH's normal host-key verification behavior.
+
+Runner **never automatically retries commands**. If SSH returns `255`, Runner stops additional commands on that node, continues with remaining nodes, and reports the result as ambiguous because a remote command can also deliberately return `255`.
+
+Other non-zero command statuses are reported literally. Runner does not try to interpret a remote program's meaning.
+
+Log files are created uniquely using `mktemp` with permission `0600` in a private `LOG_DIR` (default `~/.local/state/runner`, required mode `0700`, owned by the Runner user). Log files can contain operational and command-output secrets; handle retention accordingly.
+
+## Security and limitations
+
+- No config file is executed. The parser does not expand shell syntax.
+- Keep private inventories, SSH private keys, operational checks and logs out of Git.
+- Runner executes reviewed commands exactly as supplied; it is not a command policy engine or sandbox.
+- `-y` skips Runner's confirmation prompt. Use it only with reviewed commands.
+- Remote SSH policy and sudo/PAM policy remain server responsibilities.
+- Runner uses configured SSH private-key identities for remote connections.
+
+## Offline checks
 
 ```bash
-./runner.sh -f checks/system-info.txt
+bash -n runner.sh
+./runner.sh --version
+./runner.sh -l
+bash tests/offline-smoke.sh
+# Optional, if installed:
+shellcheck -s bash runner.sh
 ```
 
-Run it on selected hosts:
-
-```bash
-./runner.sh -n 1 2 -f checks/system-info.txt
-```
-
-Run it on all configured remote hosts:
-
-```bash
-./runner.sh -a -f checks/system-info.txt
-```
-
-Each line is executed independently. Shell state does not persist between lines.
-
-For example:
-
-```text
-cd /var/log
-pwd
-```
-
-does not carry the directory change into the second command. Use a single line when commands depend on shared shell state:
-
-```text
-cd /var/log && pwd
-```
-
-## Execution model
-
-Runner builds a target set from the command-line options and executes commands in the order supplied.
-
-For each selected host, Runner runs each command before moving to the next host. Remote execution uses the configured SSH user and key for that host.
-
-Remote connections use the configured hostname by default. `-ip` switches the connection address to the configured IP address without changing the selected credentials.
-
-For remote targets, Runner loads the required configured key into an available `ssh-agent`. If no usable agent is available, Runner starts one for its own process tree and stops it when Runner exits.
-
-Before execution, Runner prints the target set and commands:
-
-```text
-The following 2 command(s) will run on: node01.example.com node02.example.com
----
-  date
-  uptime
----
-Proceed? [y/N]
-```
-
-The confirmation prompt is skipped only when `-y` is specified.
-
-## Output and logging
-
-Runner writes command output to the terminal and to a timestamped log in `LOG_DIR`.
-
-Each command is identified by target, command, and UTC timestamp:
-
-```text
-=== node01.example.com — uptime — 2026-10-25T09:50:40Z ===
-```
-
-The command exit status follows the output:
-
-```text
---- exit_status=0 ---
-```
-
-Standard output and standard error are captured together.
-
-A non-zero command status is reported as returned by the command. Runner does not assign additional meaning to that value.
-
-After all commands complete, Runner prints the log path and a summary of non-zero command results.
-
-Runner currently exits with process status `0` after a completed run. Use the per-command `exit_status` lines when evaluating individual command results.
-
-Logs are created with restrictive permissions through `umask 077`.
-
-## Example
-
-The following is an anonymized, shortened example based on a real Runner execution.
-
-The example uses:
-
-```bash
-LOG_DIR="${HOME}/logs"
-```
-
-```text
-admin@workstation ~/runner $ ./runner.sh -n 1 2 -c 'date' -c 'uptime'
-
-Enter passphrase for /home/admin/.ssh/id_rsa:
-Identity added: /home/admin/.ssh/id_rsa
-
-The following 2 command(s) will run on: node01.example.com node02.example.com
----
-  date
-  sudo uptime
----
-Proceed? [y/N] y
-
-==========================================
-runner — run started: 2026-10-25 09:50:39 UTC
-==========================================
-
-=== node01.example.com — date — 2026-10-25T09:50:39Z ===
-Sun Oct 25 10:50:40 AM CET 2026
---- exit_status=0 ---
-
-=== node01.example.com — uptime — 2026-10-25T09:50:40Z ===
-10:50:41 up 3 days, 14:49, 1 user, load average: 0.00, 0.00, 0.00
---- exit_status=0 ---
-
-=== node02.example.com — date — 2026-10-25T09:50:41Z ===
-Sun Oct 25 09:50:41 AM UTC 2026
---- exit_status=0 ---
-
-=== node02.example.com — uptime — 2026-10-25T09:50:41Z ===
-09:50:44 up 2 days, 22:04, 0 users, load average: 0.00, 0.02, 0.00
---- exit_status=0 ---
-
-Log saved: /home/admin/logs/runner_20261025_105026.log
-0 of 4 command run(s) returned a non-zero exit status — not necessarily a failure, see exit_status lines above.
-```
-
-## AI and LLM-assisted administration
-
-Runner also fits human-in-the-loop workflows with AI or LLM assistants.
-
-Its output is plain text with explicit boundaries for the target, command, timestamp, command output, exit status, and final summary. An administrator can review commands proposed during an AI-assisted troubleshooting or administration session, execute the approved commands with Runner, and return the resulting output for further analysis.
-
-Runner does not require direct integration with an AI service. The administrator remains the execution boundary between the assistant and the managed systems.
-
-## Security considerations
-
-`runner.cfg` is Bash source code and is sourced directly by Runner. Use only trusted configuration.
-
-Runner executes commands with the privileges of the local account or the configured remote SSH account.
-
-SSH uses `IdentitiesOnly=yes` with the configured key. Runner does not disable normal OpenSSH host-key verification.
-
-The confirmation prompt provides an execution checkpoint. `-y` bypasses that checkpoint.
-
-Logs can contain operational or sensitive command output and should be handled accordingly.
-
-The supplied `.gitignore` excludes `runner.cfg`, generated logs, common key files, and local-only check files from the public repository.
+The smoke tests use a simulated `ssh` command and do **not** connect to real servers.
 
 ## Project layout
 
@@ -387,28 +166,25 @@ The supplied `.gitignore` excludes `runner.cfg`, generated logs, common key file
 runner/
 ├── runner.sh
 ├── runner.cfg.example
+├── tools/
+│   └── migrate-config.py
+├── tests/
+│   └── offline-smoke.sh
 ├── checks/
 │   └── system-info.txt
+├── docs/
+│   └── SUDO.md
 ├── .gitignore
 ├── LICENSE
 └── README.md
 ```
 
-## Contributing
+## License and copyright
 
-Issues and pull requests are welcome:
+[BSD 3-Clause License](LICENSE) (`BSD-3-Clause`).
 
-[https://github.com/wondercohen/runner](https://github.com/wondercohen/runner)
+- **Copyright © 2026 Wonder Cohen B.V.**
+- **KvK:** 96871571
+- **Website:** https://wondercohen.com/
 
-Runner is intentionally small. Changes should preserve the direct execution model, minimal dependencies, readable configuration, and plain-text output.
-
-## License
-
-Runner is released under the [BSD 3-Clause License](LICENSE).
-
-Copyright © 2026 Wonder Cohen B.V.
-
-## Maintainer
-
-**Wonder Cohen B.V.**
-[https://wondercohen.com/](https://wondercohen.com/)
+Created and maintained by Wonder Cohen B.V. Contributions and issue reports are welcome.
